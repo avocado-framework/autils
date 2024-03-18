@@ -51,24 +51,25 @@ jobs:
           usr_names=()
 
           for utils_meta in ./metadata/autils/*/; do
-                  for metadata_file in $utils_meta*.yml; do
-                          usr_names+=("@$(sed -n '/github_usr_name:[[:space:]]*\([^[:space:]]\+\)/{s/github_usr_name:[[:space:]]*//;s/[[:space:]]//g;p;q;}' $metadata_file)")
-                  done
+            for metadata_file in $utils_meta*.yml; do
+              usr_names+=("@$(sed -n '/github_usr_name:[[:space:]]*\([^[:space:]]\+\)/{s/github_usr_name:[[:space:]]*//;s/[[:space:]]//g;p;q;}' $metadata_file)")
+            done
           done
-
           echo 'USR_NAMES='$(echo "${usr_names[@]}" | tr ' ' '\n' | sort -u) >> $GITHUB_ENV
+          echo 'TIME_FOR_RELEASE=0' >> $GITHUB_ENV
       - name: Create release discussion
         if: ${{ env.TIME_FOR_VOTE == 1 }}
         env:
           GITHUB_TOKEN: ${{ steps.generate_token.outputs.token }}
         run: |
-          if [[ "${{ env.DISCUSSION_ID }}" = "null" ]]; then
+          if [[ ${{ env.DISCUSSION_ID }} = "null" ]]; then
             gh api graphql -f query='mutation {
               createDiscussion(input: {
                 repositoryId: ${{ vars.REPOSITORY_ID }},
                 categoryId: ${{ vars.CATEGORY_ID }},
                 body: "Hello all,
-                      Autils reached threshold of ${{ vars.RELEASE_THRESHOLD }} commits from the latest release and now we have ${{ env.COMMITS_NUMBER }} commits from the latest release. Therefore, it is time to vote if new release is needed. Please use :+1:  or :-1: for this discussion to vote.
+                      Autils reached threshold of ${{ vars.RELEASE_THRESHOLD }} commits from the latest release and now we have ${{ env.COMMITS_NUMBER }} commits from the latest release. Therefore, it is
+                      time to vote if new release is needed. Please use :+1: for this discussion if you agree with the release. The release will be run when all maintainers will :+1:.
                       Thank you.\n\nThis vote is meat only for maintainers: ${{ env.USR_NAMES }}",
                 title: "Release decision"}) {
 
@@ -79,17 +80,33 @@ jobs:
             }
             '
           fi
-      - name: Add comment to discussion
+      - name: Count votes
         if: ${{ env.TIME_FOR_VOTE == 1 }}
         env:
           GITHUB_TOKEN: ${{ steps.generate_token.outputs.token }}
         run: |
-          if [[ "${{ env.DISCUSSION_ID }}" != "null" ]]; then
+          if [[ ${{ env.DISCUSSION_ID }} != "null" ]]; then
+            readarray -t usr_names <<< "${{ env.USR_NAMES }}"
+            thumbs_up_users=$(gh api graphql -f query='{
+                       node(id: ${{ env.DISCUSSION_ID }}) {
+                        ... on Discussion {
+                          reactions(content:THUMBS_UP, first:50) {
+                            nodes{
+                              createdAt
+                              user {
+                                login
+                              }
+                            }
+                          }
+                        }
+                      }
+            }' | jq .data.node.reactions.nodes[].user.login | sort | tr -d '"')
+            missing_votes=($(comm -23 <(echo "${usr_names[@]}" | tr -d '@') <(echo "${thumbs_up_users[@]}")))
+            if [ "${#missing_votes[@]}" -eq 0 ]; then
               gh api graphql -f query='mutation {
                 addDiscussionComment(input: {
                   discussionId: ${{ env.DISCUSSION_ID }},
-                  body: "This is a kindly reminder of ongoing release voting. Please use :+1:  or :-1:  for this discussion to vote.
-                      Thank you.\n\nNew commits from the beginning of the voting: ${{ env.NEW_COMMITS }}\nThis vote is meat only for maintainers: ${{ env.USR_NAMES }}"}) {
+                  body: "We have enough votes now, the release pipeline has started, and I am closing this discussion. Thank you all for participation."}) {
 
                   comment {
                     id
@@ -97,4 +114,46 @@ jobs:
                 }
               }
               '
+              gh api graphql -f query='mutation {
+                closeDiscussion(input: {
+                  discussionId: ${{ env.DISCUSSION_ID }}}) {
+
+                  discussion {
+                    id
+                  }
+                }
+              }'
+              echo "It is time for release."
+              echo 'TIME_FOR_RELEASE=1' >> $GITHUB_ENV
+            else
+              echo "We don't have enought votes."
+            fi
+
+            echo 'MISSING_VOTES_NAMES='$(printf '@%s' "${missing_votes[@]}" | tr ' ' '\n' | sort -u) >> $GITHUB_ENV
           fi
+      - name: Add comment to discussion
+        if: ${{ env.TIME_FOR_VOTE == 1 }}
+        env:
+          GITHUB_TOKEN: ${{ steps.generate_token.outputs.token }}
+        run: |
+          if [[ ${{ env.DISCUSSION_ID }} != "null" && ${{ env.TIME_FOR_RELEASE }} == 0 ]]; then
+            gh api graphql -f query='mutation {
+              addDiscussionComment(input: {
+                discussionId: ${{ env.DISCUSSION_ID }},
+                body: "This is a kindly reminder of ongoing release voting. Please use :+1:  or for this discussion to vote.
+                    Thank you.\n\nNew commits from the beginning of the voting: ${{ env.NEW_COMMITS }}
+                    The maintainers who have not voted yet: ${{ env.MISSING_VOTES_NAMES }}"}) {
+
+                comment {
+                  id
+                }
+              }
+            }
+            '
+          fi
+      - name: Release
+        if: ${{ env.TIME_FOR_RELEASE == 1 }}
+        env:
+          GITHUB_TOKEN: ${{ steps.generate_token.outputs.token }}
+        run: |
+          echo 'RELEASE'
